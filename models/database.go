@@ -536,6 +536,9 @@ var databaseSchema = [][]string{
 			PRIMARY KEY (id)
 		)`,
 	},
+	40: {
+		`ALTER TABLE agents ADD COLUMN postgresql_options JSONB`,
+	},
 }
 
 // ^^^ Avoid default values in schema definition. ^^^
