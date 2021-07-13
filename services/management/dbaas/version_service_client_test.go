@@ -26,6 +26,7 @@ import (
 	"testing"
 	"time"
 
+	goversion "github.com/hashicorp/go-version"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -62,17 +63,49 @@ func TestVersionServiceClient(t *testing.T) {
 }
 
 type fakeLatestVersionServer struct {
-	response *VersionServiceResponse
+	response   *VersionServiceResponse
+	components []string
 }
 
 func (f fakeLatestVersionServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	encoder := json.NewEncoder(w)
 	var response *VersionServiceResponse
-	if strings.Contains(r.URL.Path, "pmm-server/") {
+	var certainVersionRequested bool
+	var component string
+	for _, c := range f.components {
+		if strings.Contains(r.URL.Path, c) {
+			component = c
+			certainVersionRequested = strings.Contains(r.URL.Path, component+"/")
+			break
+		}
+	}
+	if certainVersionRequested {
 		segments := strings.Split(r.URL.Path, "/")
-		pmmServerVersion := segments[len(segments)-1]
+		version := segments[len(segments)-2]
+		var dbVersion string
+		// handle product/version/applyversion
+		if _, err := goversion.NewVersion(version); err == nil {
+			dbVersion = segments[len(segments)-1]
+		} else {
+			version = segments[len(segments)-1]
+		}
 		for _, v := range f.response.Versions {
-			if v.ProductVersion == pmmServerVersion {
+			if v.ProductVersion == version && v.Product == component {
+				if dbVersion != "" {
+					var database map[string]componentVersion
+					switch component {
+					case pxcOperator:
+						database = v.Matrix.Pxc
+					case psmdbOperator:
+						database = v.Matrix.Mongod
+					default:
+						panic(component + " not supported")
+					}
+					if _, ok := database[dbVersion]; !ok {
+						response = nil
+						break
+					}
+				}
 				response = &VersionServiceResponse{
 					Versions: []struct {
 						Product        string `json:"product"`
@@ -80,12 +113,18 @@ func (f fakeLatestVersionServer) ServeHTTP(w http.ResponseWriter, r *http.Reques
 						Matrix         matrix `json:"matrix"`
 					}{v},
 				}
+				break
 			}
 		}
-	} else if strings.HasSuffix(r.URL.Path, "pmm-server") {
-		response = f.response
+	} else if component != "" {
+		response = &VersionServiceResponse{}
+		for _, v := range f.response.Versions {
+			if v.Product == component {
+				response.Versions = append(response.Versions, v)
+			}
+		}
 	} else {
-		panic("path not expected")
+		panic("path " + r.URL.Path + " not expected")
 	}
 	err := encoder.Encode(response)
 	if err != nil {
@@ -93,11 +132,17 @@ func (f fakeLatestVersionServer) ServeHTTP(w http.ResponseWriter, r *http.Reques
 	}
 }
 
-func newFakeVersionService(response *VersionServiceResponse, port string) (versionService, func(*testing.T)) {
+// newFakeVersionService creates new fake version service on given port.
+// It returns values based on given response but only for specified components.
+func newFakeVersionService(response *VersionServiceResponse, port string, components ...string) (versionService, func(*testing.T)) {
+	if len(components) == 0 {
+		panic("failed to create fake version service, at least one component has to be given, none received")
+	}
 	var httpServer *http.Server
 	waitForListener := make(chan struct{})
 	server := fakeLatestVersionServer{
-		response: response,
+		response:   response,
+		components: components,
 	}
 	fakeHostAndPort := "localhost:" + port
 	go func() {
@@ -151,7 +196,7 @@ func TestLatestVersionGetting(t *testing.T) {
 			},
 		},
 	}
-	c, cleanup := newFakeVersionService(response, "5897")
+	c, cleanup := newFakeVersionService(response, "5897", "pmm-server")
 	t.Cleanup(func() { cleanup(t) })
 	t.Run("Get latest", func(t *testing.T) {
 		t.Parallel()

@@ -22,8 +22,10 @@ import (
 	"sync"
 
 	goversion "github.com/hashicorp/go-version"
+	controllerv1beta1 "github.com/percona-platform/dbaas-api/gen/controller"
 	dbaasv1beta1 "github.com/percona/pmm/api/managementpb/dbaas"
 	pmmversion "github.com/percona/pmm/version"
+	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -391,4 +393,91 @@ func setComponent(kc *models.Component, rc *dbaasv1beta1.ChangeComponent) (*mode
 	}
 	kc.DisabledVersions = stringset.ToSlice(disabledVersions)
 	return kc, nil
+}
+
+func (c componentsService) unsetDefaultVersionIfUnsupported(ctx context.Context, operatorType, operatorVersion string, component *models.Component) (bool, error) {
+	if component == nil {
+		return false, nil
+	}
+	supported, err := c.versionServiceClient.IsDatabaseVersionSupportedByOperator(ctx, operatorType, operatorVersion, component.DefaultVersion)
+	if !supported {
+		if err != nil {
+			return false, err
+		}
+		// When default version is empty, the latest recommended version is used.
+		component.DefaultVersion = ""
+		return true, nil
+	}
+	return false, nil
+}
+
+func (c componentsService) InstallOperator(ctx context.Context, req *dbaasv1beta1.InstallOperatorRequest) (*dbaasv1beta1.InstallOperatorResponse, error) {
+	kubernetesCluster, err := models.FindKubernetesClusterByName(c.db.Querier, req.KubernetesClusterName)
+	if err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+
+	parsedPMMVersion, err := goversion.NewVersion(pmmversion.PMMVersion)
+	if err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+	pmmVersion := parsedPMMVersion.Core().String()
+
+	// Just check the version we are asked to update to is present in version service.
+	resp, err := c.versionServiceClient.Matrix(ctx, componentsParams{product: "pmm-server", productVersion: pmmVersion})
+	if err != nil {
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+	if len(resp.Versions) == 0 {
+		return nil, errors.Errorf("failed to validate operator version")
+	}
+
+	var component *models.Component
+	switch req.OperatorType {
+	case pxcOperator:
+		if _, ok := resp.Versions[0].Matrix.PXCOperator[req.Version]; !ok {
+			return nil, errors.Errorf("requested update to operator version %s is not supported", req.Version)
+		}
+		_, err = c.dbaasClient.InstallXtraDBOperator(ctx, &controllerv1beta1.InstallXtraDBOperatorRequest{
+			KubeAuth: &controllerv1beta1.KubeAuth{
+				Kubeconfig: kubernetesCluster.KubeConfig,
+			},
+			Version: req.Version,
+		})
+		component = kubernetesCluster.PXC
+	case psmdbOperator:
+		if _, ok := resp.Versions[0].Matrix.PSMDBOperator[req.Version]; !ok {
+			return nil, errors.Errorf("requested update to operator version %s is not supported", req.Version)
+		}
+		_, err = c.dbaasClient.InstallPSMDBOperator(ctx, &controllerv1beta1.InstallPSMDBOperatorRequest{
+			KubeAuth: &controllerv1beta1.KubeAuth{
+				Kubeconfig: kubernetesCluster.KubeConfig,
+			},
+			Version: req.Version,
+		})
+		component = kubernetesCluster.Mongod
+	default:
+		return &dbaasv1beta1.InstallOperatorResponse{Status: dbaasv1beta1.OperatorsStatus_OPERATORS_STATUS_NOT_INSTALLED},
+			errors.Errorf("%q is not supported operator", req.OperatorType)
+	}
+	if err != nil {
+		return &dbaasv1beta1.InstallOperatorResponse{Status: dbaasv1beta1.OperatorsStatus_OPERATORS_STATUS_NOT_INSTALLED},
+			status.Errorf(codes.Internal, "failed to install operator: %v", err)
+	}
+
+	// Default version of database could have become unsupported when update was installed.
+	unset, err := c.unsetDefaultVersionIfUnsupported(ctx, req.OperatorType, req.Version, component)
+	if err != nil {
+		return &dbaasv1beta1.InstallOperatorResponse{Status: dbaasv1beta1.OperatorsStatus_OPERATORS_STATUS_OK},
+			status.Errorf(codes.Internal, "failed to unset unsupported default database version: %v", err)
+	}
+	if unset {
+		err = c.db.Save(kubernetesCluster)
+		if err != nil {
+			return &dbaasv1beta1.InstallOperatorResponse{Status: dbaasv1beta1.OperatorsStatus_OPERATORS_STATUS_OK},
+				status.Errorf(codes.Internal, "failed to unset unsupported default database version: %v", err)
+		}
+	}
+
+	return &dbaasv1beta1.InstallOperatorResponse{Status: dbaasv1beta1.OperatorsStatus_OPERATORS_STATUS_OK}, nil
 }
