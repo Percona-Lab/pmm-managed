@@ -226,6 +226,9 @@ func (s *Service) prepareRestoreJob(
 	if err != nil {
 		return nil, err
 	}
+	if artifact.Status != models.SuccessBackupStatus {
+		return nil, errors.Errorf("artifact %q status is not successful, status: %q", artifactID, artifact.Status)
+	}
 
 	location, err := models.FindBackupLocationByID(q, artifact.LocationID)
 	if err != nil {
@@ -306,16 +309,13 @@ func (s *Service) prepareBackupJob(
 	if err != nil {
 		return nil, nil, err
 	}
-
 	pmmAgents, err := models.FindPMMAgentsForService(q, service.ServiceID)
 	if err != nil {
 		return nil, nil, err
 	}
-
 	if len(pmmAgents) == 0 {
 		return nil, nil, errors.Errorf("pmmAgent not found for service")
 	}
-
 	var jobResultData *models.JobResultData
 	switch jobType {
 	case models.MySQLBackupJob:
@@ -337,12 +337,9 @@ func (s *Service) prepareBackupJob(
 	default:
 		return nil, nil, errors.Errorf("unsupported backup job type: %s", jobType)
 	}
-
 	res, err := models.CreateJobResult(q, pmmAgents[0].AgentID, jobType, jobResultData)
-
 	if err != nil {
 		return nil, nil, err
 	}
-
 	return res, dbConfig, nil
 }

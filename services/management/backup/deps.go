@@ -18,12 +18,14 @@ package backup
 
 import (
 	"context"
+	"time"
 
 	"github.com/percona/pmm-managed/services/scheduler"
 
 	"github.com/percona/pmm-managed/models"
 )
 
+//go:generate mockery -name=jobsService -case=snake -inpkg -testonly
 //go:generate mockery -name=awsS3 -case=snake -inpkg -testonly
 //go:generate mockery -name=backupService -case=snake -inpkg -testonly
 //go:generate mockery -name=scheduleService -case=snake -inpkg -testonly
@@ -31,6 +33,7 @@ import (
 type awsS3 interface {
 	GetBucketLocation(ctx context.Context, host string, accessKey, secretKey, name string) (string, error)
 	BucketExists(ctx context.Context, host string, accessKey, secretKey, name string) (bool, error)
+	RemoveRecursive(ctx context.Context, endpoint, accessKey, secretKey, bucketName, prefix string) error
 }
 
 type backupService interface {
@@ -45,4 +48,42 @@ type scheduleService interface {
 	Add(task scheduler.Task, params scheduler.AddParams) (*models.ScheduledTask, error)
 	Remove(id string) error
 	Update(id string, params models.ChangeScheduledTaskParams) error
+}
+
+// jobsService is a subset of methods of agents.JobsService used by this package.
+// We use it instead of real type for testing and to avoid dependency cycle.
+type jobsService interface {
+	StopJob(jobID string) error
+	StartMySQLBackupJob(
+		jobID string,
+		pmmAgentID string,
+		timeout time.Duration,
+		name string,
+		dbConfig *models.DBConfig,
+		locationConfig *models.BackupLocationConfig,
+	) error
+	StartMySQLRestoreBackupJob(
+		jobID string,
+		pmmAgentID string,
+		serviceID string,
+		timeout time.Duration,
+		name string,
+		locationConfig *models.BackupLocationConfig,
+	) error
+	StartMongoDBBackupJob(
+		jobID string,
+		pmmAgentID string,
+		timeout time.Duration,
+		name string,
+		dbConfig *models.DBConfig,
+		locationConfig *models.BackupLocationConfig,
+	) error
+	StartMongoDBRestoreBackupJob(
+		jobID string,
+		pmmAgentID string,
+		timeout time.Duration,
+		name string,
+		dbConfig *models.DBConfig,
+		locationConfig *models.BackupLocationConfig,
+	) error
 }
