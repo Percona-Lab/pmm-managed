@@ -637,6 +637,55 @@ type CreateAgentParams struct {
 	DisableCollectors              []string
 }
 
+func compatibleNodeAndAgent(nodeType NodeType, agentType AgentType) bool {
+	const allowAll = "allow_all"
+	allow := map[NodeType]AgentType{
+		GenericNodeType:             allowAll,
+		ContainerNodeType:           allowAll,
+		RemoteNodeType:              ExternalExporterType,
+		RemoteRDSNodeType:           RDSExporterType,
+		RemoteAzureDatabaseNodeType: AzureDatabaseExporterType,
+	}
+
+	allowed, ok := allow[nodeType]
+	if !ok {
+		return true
+	}
+
+	if allowed == allowAll {
+		return true
+	}
+
+	return allowed == agentType
+}
+
+func compatibleServiceAndAgent(serviceType ServiceType, agentType AgentType) bool {
+	const forbidden = "forbidden"
+	allow := map[AgentType]ServiceType{
+		PMMAgentType:                        forbidden,
+		NodeExporterType:                    forbidden,
+		RDSExporterType:                     forbidden,
+		AzureDatabaseExporterType:           forbidden,
+		VMAgentType:                         forbidden,
+		MySQLdExporterType:                  MySQLServiceType,
+		QANMySQLSlowlogAgentType:            MySQLServiceType,
+		QANMySQLPerfSchemaAgentType:         MySQLServiceType,
+		MongoDBExporterType:                 MongoDBServiceType,
+		QANMongoDBProfilerAgentType:         MongoDBServiceType,
+		PostgresExporterType:                PostgreSQLServiceType,
+		QANPostgreSQLPgStatMonitorAgentType: PostgreSQLServiceType,
+		QANPostgreSQLPgStatementsAgentType:  PostgreSQLServiceType,
+		ExternalExporterType:                ExternalServiceType,
+	}
+
+	allowed, ok := allow[agentType]
+	if !ok {
+		return true
+	}
+
+	return allowed == serviceType
+}
+
 // CreateAgent creates Agent with given type.
 func CreateAgent(q *reform.Querier, agentType AgentType, params *CreateAgentParams) (*Agent, error) {
 	id := "/agent_id/" + uuid.New().String()
@@ -658,13 +707,24 @@ func CreateAgent(q *reform.Querier, agentType AgentType, params *CreateAgentPara
 	}
 
 	if params.NodeID != "" {
-		if _, err := FindNodeByID(q, params.NodeID); err != nil {
+		node, err := FindNodeByID(q, params.NodeID)
+		if err != nil {
 			return nil, err
 		}
+
+		if !compatibleNodeAndAgent(node.NodeType, agentType) {
+			return nil, status.Errorf(codes.FailedPrecondition, "invalid combination of node type %s and agent type %s", node.NodeType, agentType)
+		}
 	}
+
 	if params.ServiceID != "" {
-		if _, err := FindServiceByID(q, params.ServiceID); err != nil {
+		svc, err := FindServiceByID(q, params.ServiceID)
+		if err != nil {
 			return nil, err
+		}
+
+		if !compatibleServiceAndAgent(svc.ServiceType, agentType) {
+			return nil, status.Errorf(codes.FailedPrecondition, "invalid combination of service type %s and agent type %s", svc.ServiceType, agentType)
 		}
 	}
 
